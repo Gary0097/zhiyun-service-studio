@@ -1,0 +1,30 @@
+{
+  "id": "zhiyun-service-studio",
+  "name": "智能售后服务中心",
+  "version": "0.1.0",
+  "type": "app",
+  "description": "基于真实咨询与维修记录完成意图识别、知识化应答、售后工单智能路由与知识库构建优化。",
+  "author": "Zhiyun AI",
+  "entry": {
+    "backend": "backend/main.py",
+    "frontend": "ui/index.js"
+  },
+  "dependencies": [],
+  "qwenpaw_version": {
+    "min": "2.1.0",
+    "max": "2.2.0"
+  },
+  "meta": {
+    "pawapp": {
+      "icon": "🎧",
+      "category": "service",
+      "entry_page": "/apps/zhiyun-service-studio",
+      "launch_scope": "page"
+    },
+    "permissions": {
+      "chat": true,
+      "storage": true
+    },
+    "requires": ["zhiyun-data-core>=0.1.0"]
+  }
+}
