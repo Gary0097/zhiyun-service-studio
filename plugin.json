@@ -1,7 +1,7 @@
 {
   "id": "zhiyun-service-studio",
   "name": "智能售后服务中心",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "app",
   "description": "基于真实咨询与维修记录完成意图识别、知识化应答、售后工单智能路由与知识库构建优化。",
   "author": "Zhiyun AI",
