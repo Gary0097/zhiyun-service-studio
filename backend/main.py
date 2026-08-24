@@ -28,7 +28,7 @@ except ImportError:
     from service_workflow import ServiceWorkflowStore
 
 router = APIRouter()
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.0"
 
 
 def _store() -> ServiceWorkflowStore:
@@ -71,6 +71,12 @@ class KnowledgeReviewRequest(BaseModel):
     note: str | None = Field(default=None, max_length=2000)
 
 
+class ArtifactReviewRequest(BaseModel):
+    action: str
+    reviewer: str = Field(min_length=1, max_length=100)
+    note: str | None = Field(default=None, max_length=2000)
+
+
 @router.get("/health")
 async def health() -> dict[str, Any]:
     return {"status": "available", "version": PLUGIN_VERSION}
@@ -79,17 +85,53 @@ async def health() -> dict[str, Any]:
 @router.post("/intent/classify")
 async def intent_classify(request: TextRequest) -> dict[str, Any]:
     try:
-        return classify_intent(request.text)
+        result = classify_intent(request.text)
+        return _store().create_consult_artifact("intent", result)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except sqlite3.Error as exc:
+        raise HTTPException(status_code=503, detail=f"售后持久化依赖不可用：{exc}") from exc
 
 
 @router.post("/answer")
 async def answer(request: TextRequest) -> dict[str, Any]:
     try:
-        return answer_consult(request.text)
+        result = answer_consult(request.text)
+        return _store().create_consult_artifact("answer", result)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except sqlite3.Error as exc:
+        raise HTTPException(status_code=503, detail=f"售后持久化依赖不可用：{exc}") from exc
+
+
+@router.get("/artifacts/{artifact_id}")
+async def get_consult_artifact(artifact_id: str) -> dict[str, Any]:
+    try:
+        return _store()._consult_result(artifact_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="工件不存在") from exc
+
+
+@router.post("/artifacts/{artifact_id}/reviews")
+async def review_consult_artifact(artifact_id: str, request: ArtifactReviewRequest) -> dict[str, Any]:
+    try:
+        return _store().review_consult_artifact(artifact_id, request.action, request.reviewer, request.note)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="工件不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/artifacts/{artifact_id}/export")
+async def export_consult_artifact(artifact_id: str) -> Response:
+    try:
+        content, media_type = _store().export_consult_artifact(artifact_id)
+        return Response(content=content, media_type=media_type,
+                        headers={"Content-Disposition": 'attachment; filename="artifact.json"'})
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="工件不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/knowledge/extract")

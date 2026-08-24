@@ -65,7 +65,77 @@ class ServiceWorkflowStore:
                     id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL REFERENCES knowledge_artifacts(id),
                     action TEXT NOT NULL, reviewer TEXT NOT NULL, note TEXT, created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS consult_artifacts (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS consult_reviews (
+                    id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL REFERENCES consult_artifacts(id),
+                    action TEXT NOT NULL, reviewer TEXT NOT NULL, note TEXT, created_at TEXT NOT NULL
+                );
             """)
+
+    def create_consult_artifact(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist a stateless consultation/intent result so it becomes reviewable and exportable."""
+        if not kind.strip():
+            raise ValueError("工件类型不能为空")
+        artifact_id, now = str(uuid.uuid4()), _now()
+        with closing(self._connect()) as db, db:
+            db.execute("INSERT INTO consult_artifacts VALUES (?,?,?,?,?,?)",
+                       (artifact_id, kind, json.dumps(payload, ensure_ascii=False), "pending_review", now, now))
+        # Return the merged payload (business data + audit metadata) so the UI renders
+        # the real result directly instead of only the artifact wrapper.
+        return self._consult_result(artifact_id)
+
+    def get_consult_artifact(self, artifact_id: str) -> dict[str, Any]:
+        with closing(self._connect()) as db, db:
+            row = db.execute("SELECT * FROM consult_artifacts WHERE id=?", (artifact_id,)).fetchone()
+            if not row:
+                raise KeyError(artifact_id)
+            reviews = [dict(item) for item in db.execute(
+                "SELECT * FROM consult_reviews WHERE artifact_id=? ORDER BY created_at", (artifact_id,)
+            )]
+            result = dict(row)
+            result.pop("payload_json")
+            result["reviews"] = reviews
+            return result
+
+    def _consult_result(self, artifact_id: str) -> dict[str, Any]:
+        artifact = self.get_consult_artifact(artifact_id)
+        with closing(self._connect()) as db, db:
+            row = db.execute("SELECT payload_json FROM consult_artifacts WHERE id=?", (artifact_id,)).fetchone()
+            payload = json.loads(row["payload_json"])
+        merged = dict(payload)
+        merged.update({
+            "id": artifact["id"],
+            "kind": artifact["kind"],
+            "status": artifact["status"],
+            "created_at": artifact["created_at"],
+            "updated_at": artifact["updated_at"],
+            "reviews": artifact["reviews"],
+        })
+        return merged
+
+    def review_consult_artifact(self, artifact_id: str, action: str, reviewer: str,
+                                note: str | None = None) -> dict[str, Any]:
+        if action not in {"accept", "reject"}:
+            raise ValueError("工件审阅动作必须是 accept 或 reject")
+        if not reviewer.strip():
+            raise ValueError("审阅人不能为空")
+        self.get_consult_artifact(artifact_id)
+        now = _now()
+        with closing(self._connect()) as db, db:
+            db.execute("INSERT INTO consult_reviews VALUES (?,?,?,?,?,?)",
+                       (str(uuid.uuid4()), artifact_id, action, reviewer.strip(), note, now))
+            db.execute("UPDATE consult_artifacts SET status=?, updated_at=? WHERE id=?",
+                       ("accepted" if action == "accept" else "rejected", now, artifact_id))
+        return self._consult_result(artifact_id)
+
+    def export_consult_artifact(self, artifact_id: str) -> tuple[str, str]:
+        artifact = self._consult_result(artifact_id)
+        if artifact["status"] != "accepted":
+            raise ValueError("只有已接受的工件可以导出")
+        return json.dumps(artifact, ensure_ascii=False, indent=2), "application/json"
 
     def create_ticket(self, customer_name: str, description: str, product: str = "",
                       fault_type: str = "") -> dict[str, Any]:
