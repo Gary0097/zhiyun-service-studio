@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
-import sys
+import os
 import sqlite3
+import sys
+import time
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 from qwenpaw.plugins.api import PluginApi
 
@@ -31,8 +36,23 @@ except ImportError:
     from knowledge_engine import extract_knowledge, optimize_knowledge
     from service_workflow import ServiceWorkflowStore
 
+
+
+# ==== 统一登录鉴权：与 zhiyun-auth 相同的 HMAC Token 本地校验（PRD §15 / §17.16） ====
+try:
+    from .auth_guard import _verify_token_user
+except ImportError:  # pragma: no cover
+    from auth_guard import _verify_token_user
+
+
+def require_auth(authorization: str = Header(default="")) -> None:
+    """所有业务端点统一要求有效登录令牌；/health 保持开放供探活。"""
+    if _verify_token_user(authorization) is None:
+        raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
+
+
 router = APIRouter()
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 
 
 def _store() -> ServiceWorkflowStore:
@@ -86,7 +106,7 @@ async def health() -> dict[str, Any]:
     return {"status": "available", "version": PLUGIN_VERSION}
 
 
-@router.post("/intent/classify")
+@router.post("/intent/classify", dependencies=[Depends(require_auth)])
 async def intent_classify(request: TextRequest) -> dict[str, Any]:
     try:
         result = classify_intent(request.text)
@@ -97,7 +117,7 @@ async def intent_classify(request: TextRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"售后持久化依赖不可用：{exc}") from exc
 
 
-@router.post("/answer")
+@router.post("/answer", dependencies=[Depends(require_auth)])
 async def answer(request: TextRequest) -> dict[str, Any]:
     try:
         result = answer_consult(request.text)
@@ -108,7 +128,7 @@ async def answer(request: TextRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"售后持久化依赖不可用：{exc}") from exc
 
 
-@router.get("/artifacts/{artifact_id}")
+@router.get("/artifacts/{artifact_id}", dependencies=[Depends(require_auth)])
 async def get_consult_artifact(artifact_id: str) -> dict[str, Any]:
     try:
         return _store()._consult_result(artifact_id)
@@ -116,7 +136,7 @@ async def get_consult_artifact(artifact_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="工件不存在") from exc
 
 
-@router.post("/artifacts/{artifact_id}/reviews")
+@router.post("/artifacts/{artifact_id}/reviews", dependencies=[Depends(require_auth)])
 async def review_consult_artifact(artifact_id: str, request: ArtifactReviewRequest) -> dict[str, Any]:
     try:
         return _store().review_consult_artifact(artifact_id, request.action, request.reviewer, request.note)
@@ -126,7 +146,7 @@ async def review_consult_artifact(artifact_id: str, request: ArtifactReviewReque
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/artifacts/{artifact_id}/export")
+@router.get("/artifacts/{artifact_id}/export", dependencies=[Depends(require_auth)])
 async def export_consult_artifact(artifact_id: str) -> Response:
     try:
         content, media_type = _store().export_consult_artifact(artifact_id)
@@ -138,7 +158,7 @@ async def export_consult_artifact(artifact_id: str) -> Response:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/knowledge/extract")
+@router.post("/knowledge/extract", dependencies=[Depends(require_auth)])
 async def knowledge_extract(request: RecordsRequest) -> dict[str, Any]:
     try:
         return extract_knowledge(request.records)
@@ -146,7 +166,7 @@ async def knowledge_extract(request: RecordsRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/knowledge/optimize")
+@router.post("/knowledge/optimize", dependencies=[Depends(require_auth)])
 async def knowledge_optimize(request: RecordsRequest) -> dict[str, Any]:
     try:
         return optimize_knowledge(request.records)
@@ -154,7 +174,7 @@ async def knowledge_optimize(request: RecordsRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/knowledge/artifacts")
+@router.post("/knowledge/artifacts", dependencies=[Depends(require_auth)])
 async def create_knowledge(request: KnowledgeBuildRequest) -> dict[str, Any]:
     try:
         extracted = extract_knowledge(request.records)
@@ -166,7 +186,7 @@ async def create_knowledge(request: KnowledgeBuildRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"售后持久化依赖不可用：{exc}") from exc
 
 
-@router.get("/knowledge/artifacts/{artifact_id}")
+@router.get("/knowledge/artifacts/{artifact_id}", dependencies=[Depends(require_auth)])
 async def get_knowledge(artifact_id: str) -> dict[str, Any]:
     try:
         return _store().get_knowledge_artifact(artifact_id)
@@ -174,7 +194,7 @@ async def get_knowledge(artifact_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="知识库不存在") from exc
 
 
-@router.post("/knowledge/artifacts/{artifact_id}/reviews")
+@router.post("/knowledge/artifacts/{artifact_id}/reviews", dependencies=[Depends(require_auth)])
 async def review_knowledge(artifact_id: str, request: KnowledgeReviewRequest) -> dict[str, Any]:
     try:
         return _store().review_knowledge(artifact_id, request.action, request.reviewer, request.note)
@@ -184,7 +204,7 @@ async def review_knowledge(artifact_id: str, request: KnowledgeReviewRequest) ->
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/knowledge/artifacts/{artifact_id}/export")
+@router.get("/knowledge/artifacts/{artifact_id}/export", dependencies=[Depends(require_auth)])
 async def export_knowledge(artifact_id: str) -> Response:
     try:
         content, media_type = _store().export_knowledge(artifact_id)
@@ -196,7 +216,7 @@ async def export_knowledge(artifact_id: str) -> Response:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/tickets")
+@router.post("/tickets", dependencies=[Depends(require_auth)])
 async def create_ticket(request: TicketRequest) -> dict[str, Any]:
     try:
         return _store().create_ticket(request.customer_name, request.description, request.product, request.fault_type)
@@ -206,7 +226,7 @@ async def create_ticket(request: TicketRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"售后持久化依赖不可用：{exc}") from exc
 
 
-@router.get("/tickets")
+@router.get("/tickets", dependencies=[Depends(require_auth)])
 async def list_tickets(limit: int = 100) -> dict[str, Any]:
     try:
         return _store().list_tickets(limit)
@@ -214,7 +234,7 @@ async def list_tickets(limit: int = 100) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"售后持久化依赖不可用：{exc}") from exc
 
 
-@router.get("/tickets/{ticket_id}")
+@router.get("/tickets/{ticket_id}", dependencies=[Depends(require_auth)])
 async def get_ticket(ticket_id: str) -> dict[str, Any]:
     try:
         return _store().get_ticket(ticket_id)
@@ -222,7 +242,7 @@ async def get_ticket(ticket_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="工单不存在") from exc
 
 
-@router.post("/tickets/{ticket_id}/reviews")
+@router.post("/tickets/{ticket_id}/reviews", dependencies=[Depends(require_auth)])
 async def review_ticket(ticket_id: str, request: TicketReviewRequest) -> dict[str, Any]:
     try:
         return _store().review_ticket(ticket_id, request.action, request.reviewer, request.engineer, request.note)
@@ -299,7 +319,7 @@ def _build_input(body: AgentChatRequest) -> list[dict[str, Any]]:
     return input_messages
 
 
-@router.post("/agent/chat")
+@router.post("/agent/chat", dependencies=[Depends(require_auth)])
 async def agent_chat(body: AgentChatRequest) -> StreamingResponse:
     """Proxy a user message to the real console chat and stream its SSE reply."""
     session_id = body.session_id or f"zhiyun-service-studio-{uuid4().hex}"
